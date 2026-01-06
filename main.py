@@ -14,7 +14,7 @@ from urllib3.util.retry import Retry
 app = FastAPI(title="SFDA Drug Export Tool")
 
 BASE_URL = "https://www.sfda.gov.sa/GetDrugs.php?page="
-TOTAL_PAGES = 3   # change only if SFDA changes pagination
+TOTAL_PAGES = 880   # change only if SFDA changes pagination
 
 # ==============================
 # IN-MEMORY JOB STORE
