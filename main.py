@@ -14,10 +14,10 @@ from urllib3.util.retry import Retry
 app = FastAPI(title="SFDA Drug Export Tool")
 
 BASE_URL = "https://www.sfda.gov.sa/GetDrugs.php?page="
-TOTAL_PAGES = 880   # change only if SFDA changes pagination
+TOTAL_PAGES = 880
 
 # ==============================
-# IN-MEMORY JOB STORE
+# IN-MEMORY JOB STORE (SINGLE CLIENT)
 # ==============================
 jobs = {}
 
@@ -28,7 +28,10 @@ def fetch_sfda_data(job_id: str):
     job = jobs[job_id]
     job["status"] = "running"
     job["message"] = "Initializing request session..."
+    job["last_updated"] = time.time()
 
+    processed_pages = 0
+    failed_pages = 0
     all_data = []
 
     session = requests.Session()
@@ -44,13 +47,14 @@ def fetch_sfda_data(job_id: str):
     session.mount("http://", adapter)
     session.mount("https://", adapter)
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (SFDA Data Tool)"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (SFDA Data Tool)"}
 
     for page in range(1, TOTAL_PAGES + 1):
+        print(f"[BACKEND] ▶ START page {page}")
+
         job["current_page"] = page
         job["message"] = f"Fetching page {page} of {TOTAL_PAGES}"
+        job["last_updated"] = time.time()
 
         try:
             response = session.get(
@@ -64,23 +68,36 @@ def fetch_sfda_data(job_id: str):
             results = data.get("results", [])
 
             if not results:
+                print(f"[BACKEND] ⛔ No results at page {page}, stopping.")
                 break
 
             all_data.extend(results)
+            processed_pages += 1
+
+            print(f"[BACKEND] ✅ DONE page {page} | total_done={processed_pages}")
+
             time.sleep(1.2)
 
         except Exception as e:
+            failed_pages += 1
+            print(f"[BACKEND] ❌ FAILED page {page} | error={e}")
             job["message"] = f"Retrying page {page}..."
             time.sleep(3)
             continue
 
     file_name = f"SFDA_Drugs_{job_id}.xlsx"
-    df = pd.DataFrame(all_data)
-    df.to_excel(file_name, index=False)
+    pd.DataFrame(all_data).to_excel(file_name, index=False)
+
+    print("=================================")
+    print(f"[SUMMARY] Pages processed successfully: {processed_pages}")
+    print(f"[SUMMARY] Pages failed/retried: {failed_pages}")
+    print(f"[SUMMARY] Total records collected: {len(all_data)}")
+    print("=================================")
 
     job["status"] = "completed"
     job["file"] = file_name
     job["message"] = "Completed successfully"
+    job["last_updated"] = time.time()
 
 # ==============================
 # ROUTES
@@ -100,31 +117,22 @@ def home():
 <body class="bg-black text-green-400 font-mono">
 
 <div class="min-h-screen flex items-center justify-center">
+  <div class="w-full max-w-6xl h-[85vh] border border-red-600 rounded-xl
+              bg-black/90 shadow-[0_0_40px_rgba(34,197,94,0.35),0_0_80px_rgba(239,68,68,0.45)]
+              flex flex-col">
 
-  <div class="w-full max-w-6xl h-[85vh] border border-green-600 rounded-xl
-              bg-black/90 shadow-[0_0_60px_rgba(34,197,94,0.45)] flex flex-col">
-
-    <!-- HEADER -->
-    <div class="flex justify-between items-center px-8 py-5 border-b border-green-600">
-      <div class="text-xl tracking-widest">
-        ⚠ SFDA DATA EXTRACTION ENGINE
-      </div>
-      <div id="badge"
-        class="px-4 py-1 text-xs bg-gray-800 text-gray-300 rounded-full">
+    <div class="flex justify-between items-center px-8 py-5 border-b border-red-600">
+      <div class="text-xl tracking-widest">⚠ SFDA DATA EXTRACTION ENGINE</div>
+      <div id="badge" class="px-4 py-1 text-xs bg-gray-800 text-gray-300 rounded-full">
         STANDBY
       </div>
     </div>
 
-    <!-- MAIN CONTENT -->
     <div class="flex flex-1 gap-6 p-6">
 
-      <!-- LEFT PANEL -->
       <div class="w-1/3 space-y-6">
-
-        <button id="startBtn"
-          onclick="startJob()"
-          class="w-full bg-green-600 hover:bg-green-500
-                 text-black font-bold py-4 rounded-lg text-lg">
+        <button id="startBtn" onclick="startJob()"
+          class="w-full bg-green-600 hover:bg-green-500 text-black font-bold py-4 rounded-lg text-lg">
           ▶ INITIATE OPERATION
         </button>
 
@@ -132,7 +140,6 @@ def home():
           <div>AI CORE: <span class="animate-pulse">ACTIVE</span></div>
           <div>SECURITY MODE: MAXIMUM</div>
           <div>TRACE ROUTING: ENABLED</div>
-          <div>DATA INTEGRITY: VERIFIED</div>
         </div>
 
         <div class="border border-green-600 rounded-lg p-4">
@@ -144,53 +151,45 @@ def home():
           <div class="text-xs text-gray-400">PROGRESS</div>
           <div id="percent" class="text-2xl mt-1">0%</div>
         </div>
-
       </div>
 
-      <!-- RIGHT PANEL -->
-      <div class="flex-1 flex flex-col">
-
-        <!-- PROGRESS BAR -->
+      <div class="flex-1 flex flex-col relative overflow-hidden">
         <div class="mb-4">
           <div class="h-4 bg-gray-800 rounded overflow-hidden">
-            <div id="bar"
-              class="h-full bg-green-500 animate-pulse transition-all duration-500"
-              style="width:0%"></div>
+            <div id="bar" class="h-full bg-green-500 animate-pulse transition-all duration-500"
+                 style="width:0%"></div>
           </div>
         </div>
 
-        <!-- TERMINAL -->
-        <div id="terminal"
-          class="flex-1 border border-green-600 rounded-lg
-                 p-4 overflow-y-auto text-sm leading-relaxed">
+        <div style="scrollbar-width: thin;" id="terminal"
+          class="h-full border  rounded-lg p-4 border-green-600
+         overflow-y-auto overflow-y-hidden
+         text-sm whitespace-pre-wrap break-words leading-relaxed ">
+
+
           <div>> SYSTEM ONLINE. Awaiting command...</div>
         </div>
-
       </div>
     </div>
   </div>
 </div>
 
-<!-- 🔊 ALARM SOUND -->
 <audio id="alarm">
-  <source src="https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg" type="audio/ogg">
+  <source src="https://actions.google.com/sounds/v1/alarms/alarm_siren.ogg" type="audio/ogg">
 </audio>
 
 <script>
 let jobId = null;
-let terminal = document.getElementById("terminal");
 let lastMessage = "";
 let alarmPlayed = false;
+const terminal = document.getElementById("terminal");
 
 const phaseLogs = [
-  "Initializing extraction modules...",
-  "Establishing secure SFDA tunnel...",
-  "Analyzing response signatures...",
-  "Normalizing data payload...",
-  "Verifying schema consistency...",
-  "Compressing result set...",
-  "Encrypting temporary buffers...",
-  "Performing integrity checks..."
+  "Establishing secure tunnel...",
+  "Analyzing traffic pattern...",
+  "Normalizing payload...",
+  "Verifying integrity...",
+  "Compressing dataset..."
 ];
 
 function log(msg) {
@@ -203,16 +202,15 @@ function startJob() {
   document.getElementById("startBtn").innerText = "OPERATION RUNNING...";
   document.getElementById("badge").innerText = "INFILTRATING";
   document.getElementById("badge").className =
-    "px-4 py-1 text-xs bg-red-600 text-white rounded-full animate-pulse";
+    "px-4 py-1 text-xs rounded-full bg-red-700 text-white animate-pulse";
 
   log("COMMAND ACCEPTED");
   log("ALLOCATING AI RESOURCES...");
-  log("OPERATION STARTED");
 
   fetch("/start")
-    .then(res => res.json())
-    .then(data => {
-      jobId = data.job_id;
+    .then(r => r.json())
+    .then(d => {
+      jobId = d.job_id;
       log("JOB ID: " + jobId);
       poll();
     });
@@ -220,85 +218,70 @@ function startJob() {
 
 function poll() {
   fetch(`/status/${jobId}`)
-    .then(res => res.json())
+    .then(r => r.json())
     .then(d => {
       const percent = Math.floor((d.current_page / d.total_pages) * 100);
-
       document.getElementById("bar").style.width = percent + "%";
       document.getElementById("percent").innerText = percent + "%";
       document.getElementById("page").innerText = d.current_page;
 
-      // ✅ prevent duplicate backend logs
       if (d.message && d.message !== lastMessage) {
         log(d.message);
         lastMessage = d.message;
       }
 
-      // ✅ controlled realistic system logs
-      if (Math.random() > 0.7) {
+      if (Math.random() > 0.75) {
         log(phaseLogs[Math.floor(Math.random() * phaseLogs.length)]);
       }
 
       if (d.status === "completed") {
         log("OPERATION COMPLETE");
-        log("PAYLOAD READY FOR DOWNLOAD");
+        log("PAYLOAD READY");
 
-        document.getElementById("badge").innerText = "EXFILTRATION";
-        document.getElementById("badge").className =
-          "px-4 py-1 text-xs bg-blue-600 text-white rounded-full";
-
-        // 🔊 play alarm ONCE
         if (!alarmPlayed) {
           const alarm = document.getElementById("alarm");
-            alarm.loop = true;     // 🔁 keep repeating
-            alarm.play();
-            alarmPlayed = true;
+          alarm.loop = true;
+          alarm.volume = 1.0;
+          alarm.play();
+          alarmPlayed = true;
 
-            setTimeout(() => {
+          setTimeout(() => {
             alarm.loop = false;
             alarm.pause();
             alarm.currentTime = 0;
-            }, 15000); // ⏱ 15 seconds
-
+          }, 15000);
         }
 
         setTimeout(() => {
           window.location.href = `/download/${jobId}`;
         }, 3000);
       } else {
-        setTimeout(poll, 3000);
+        setTimeout(poll, 1000);
       }
     });
 }
 </script>
-
 </body>
 </html>
 """
 
-
 @app.get("/start")
 def start_job():
     job_id = str(uuid.uuid4())
-
     jobs[job_id] = {
         "status": "queued",
         "current_page": 0,
         "total_pages": TOTAL_PAGES,
         "message": "Job queued",
-        "file": None
+        "file": None,
+        "last_updated": time.time()
     }
-
-    thread = threading.Thread(target=fetch_sfda_data, args=(job_id,))
-    thread.start()
-
+    threading.Thread(target=fetch_sfda_data, args=(job_id,)).start()
     return {"job_id": job_id}
-
 
 @app.get("/status/{job_id}")
 def job_status(job_id: str):
     return jobs.get(job_id, {"error": "Invalid job id"})
-
 
 @app.get("/download/{job_id}")
 def download(job_id: str):
